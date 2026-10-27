@@ -543,6 +543,7 @@ def main():
     # Opcoes globais
     for p in [p_ldap, p_kerb, p_asrep, p_spray, p_smb, p_bh]:
         p.add_argument("--verbose", action="store_true", help="Saida detalhada")
+    for p in [p_ldap, p_kerb, p_asrep, p_spray, p_smb]:
         p.add_argument("--output", help="Salvar resultados em JSON")
 
     args = parser.parse_args()
