@@ -1,6 +1,6 @@
-# 👻 Ghost-AD
+# Ghost-AD
 
-**Active Directory Offensive Toolkit** — enumeração, Kerberoasting, AS-REP Roasting, password spray, BloodHound-lite e hints de PTH/PTT.
+**Active Directory Offensive Toolkit** - enumeracao, Kerberoasting, AS-REP Roasting, password spray, BloodHound-lite e hints de PTH/PTT.
 
 ```
   .-""""""""-.
@@ -11,43 +11,43 @@
 |_______________|
  \/\/\ /\ /\/\/
 
-GHOST-AD  v1.0.0  —  Active Directory Attack Framework
+GHOST-AD  v1.0.0  -  Active Directory Attack Framework
 By Gh0st-Bx1  |  github.com/Ghost-Bx1
 ```
 
 ---
 
-## Módulos
+## Modulos
 
-| Subcomando | Descrição |
+| Subcomando | Descricao |
 |---|---|
-| `ldap` | Enumeração completa via LDAP (usuários, grupos, SPNs, AS-REP) |
-| `kerb` | Kerberoasting — lista contas com SPN para crack offline |
-| `asrep` | AS-REP Roasting — contas sem pré-autenticação |
-| `spray` | Password spraying com detecção de lockout |
-| `smb` | Enumeração SMB: null session + shares |
+| `ldap` | Enumeracao completa via LDAP (usuarios, grupos, SPNs, AS-REP) |
+| `kerb` | Kerberoasting - lista contas com SPN para crack offline |
+| `asrep` | AS-REP Roasting - contas sem pre-autenticacao |
+| `spray` | Password spraying com deteccao de lockout |
+| `smb` | Enumeracao SMB: null session + shares |
 | `bloodhound` | Coleta BloodHound-lite para JSON |
 | `pth` | Hints de Pass-the-Hash / Pass-the-Ticket |
 
 ---
 
-## Instalação
+## Instalacao
 
 ```bash
 pip install ldap3 impacket
 ```
 
-> `impacket` é opcional — os módulos `spray` e `smb` degradam graciosamente e exibem comandos equivalentes com `crackmapexec` / `smbclient`.
+> `impacket` e opcional - os modulos `spray` e `smb` degradam graciosamente e exibem comandos equivalentes com `crackmapexec` / `smbclient`.
 
 ---
 
 ## Uso
 
-### Enumeração LDAP
+### Enumeracao LDAP
 
 ```bash
 python ghost-ad.py ldap -d 192.168.1.10 --domain corp.local -u jdoe -p 'P@ssw0rd'
-python ghost-ad.py ldap -d 192.168.1.10 --domain corp.local  # sessão anônima
+python ghost-ad.py ldap -d 192.168.1.10 --domain corp.local  # sessao anonima
 ```
 
 ### Kerberoasting
@@ -93,7 +93,7 @@ python ghost-ad.py pth --domain corp.local -d 192.168.1.10 \
 
 ## Flags globais
 
-| Flag | Descrição |
+| Flag | Descricao |
 |---|---|
 | `-v / --verbose` | Output detalhado |
 | `--output <file>` | Salva resultado em arquivo texto |
@@ -102,7 +102,7 @@ python ghost-ad.py pth --domain corp.local -d 192.168.1.10 \
 
 ## Disclaimer
 
-> **Para uso exclusivo em ambientes autorizados.** Testes de penetração, CTF e pesquisa de segurança ofensiva com permissão explícita do dono do ambiente. O autor não se responsabiliza pelo uso indevido desta ferramenta.
+> **Para uso exclusivo em ambientes autorizados.** Testes de penetracao, CTF e pesquisa de seguranca ofensiva com permissao explicita do dono do ambiente. O autor nao se responsabiliza pelo uso indevido desta ferramenta.
 
 ---
 
