@@ -6,11 +6,18 @@
 import argparse
 import json
 import os
+import platform
 import socket
 import struct
 import sys
 import time
 from datetime import datetime, timezone
+
+try:
+    import colorama
+    colorama.init(autoreset=False)
+except ImportError:
+    pass
 
 VERSAO = "1.0.0"
 
