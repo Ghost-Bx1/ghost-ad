@@ -164,6 +164,9 @@ def ldap_enum(dc, domain, user=None, password=None, verbose=False):
     except ImportError:
         _log("ldap3 nao instalado. Instale: pip install ldap3", "ALERTA")
         _log("Tentando enumeracao via sondagem de porta...", "INFO")
+    except Exception as e:
+        _log(f"Erro de conexao LDAP: {e}", "ERRO")
+        _log("Tentando enumeracao via sondagem de porta...", "INFO")
 
     # Fallback: checar porta 389
     s = _socket_connect(dc, 389, timeout=3)
@@ -542,7 +545,7 @@ def main():
 
     # Opcoes globais
     for p in [p_ldap, p_kerb, p_asrep, p_spray, p_smb, p_bh]:
-        p.add_argument("--verbose", action="store_true", help="Saida detalhada")
+        p.add_argument("-v", "--verbose", action="store_true", help="Saida detalhada")
     for p in [p_ldap, p_kerb, p_asrep, p_spray, p_smb]:
         p.add_argument("--output", help="Salvar resultados em JSON")
 
