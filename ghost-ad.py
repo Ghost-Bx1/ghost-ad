@@ -583,6 +583,9 @@ def main():
     for p in [p_ldap, p_kerb, p_asrep, p_spray, p_smb]:
         p.add_argument("--output", help="Salvar resultados em JSON")
 
+    parser.add_argument("--no-banner", action="store_true", help="Suprimir banner")
+    parser.add_argument("--proxy", help="Proxy HTTP/HTTPS (ex: http://127.0.0.1:8080)")
+
     args = parser.parse_args()
 
     if not args.modo:
@@ -590,7 +593,12 @@ def main():
         parser.print_help()
         sys.exit(0)
 
-    print(BANNER)
+    if not getattr(args, "no_banner", False):
+        print(BANNER)
+
+    if getattr(args, "proxy", None):
+        os.environ["http_proxy"] = args.proxy
+        os.environ["https_proxy"] = args.proxy
 
     resultados = {"modo": args.modo, "timestamp": datetime.now(timezone.utc).isoformat()}
 
