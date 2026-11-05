@@ -1,4 +1,8 @@
+<div align="center">
+
 # Ghost-AD
+
+[![Ghost-AD](https://img.shields.io/badge/Ghost--AD-Active%20Directory-red?style=for-the-badge)](https://github.com/Ghost-Bx1/ghost-ad)
 
 > Active Directory framework - LDAP enumeration, Kerberoasting, AS-REP Roasting, and BloodHound-lite.
 
@@ -7,9 +11,12 @@
   By Gh0st-Bx1      |  github.com/Ghost-Bx1
 ```
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square)
+![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square&logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey?style=flat-square)
 ![Category](https://img.shields.io/badge/Category-Active%20Directory-red?style=flat-square)
+![By](https://img.shields.io/badge/By-Gh0st--Bx1-black?style=flat-square&logo=github)
+
+</div>
 
 ---
 
